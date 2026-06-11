@@ -85,8 +85,10 @@ def cmd_build(args):
     gbin = graphify_bin()
     bh = browser_harness_bin()
 
-    # 后端预检：ollama 需要 daemon + 模型在线
+    # 后端预检（仅用于「社区命名」这一可选步骤——图谱本体是确定性生成的，
+    # 即使本地模型不在线也能产出完整图谱，只是社区名退化为占位符）。
     genv = dict(os.environ)
+    self_backend = args.backend
     if args.backend == "ollama":
         base = args.ollama_base or os.environ.get(
             "OLLAMA_BASE_URL", "http://localhost:11434/v1"
@@ -95,23 +97,27 @@ def cmd_build(args):
         genv["OLLAMA_MODEL"] = args.model
         models = ollama_up(base)
         if models is None:
-            die(
-                f"Ollama 未在线 ({base})。先运行 `ollama serve`（或打开 Ollama.app）。"
-            )
-        if args.model not in models and args.model.split(":")[0] not in [
-            m.split(":")[0] for m in models
-        ]:
             print(
-                f"[sysmap-local] 警告: 本地未发现模型 '{args.model}'。"
-                f"已安装: {', '.join(models) or '(空)'}。"
-                f"\n  Ollama 会在首次调用时尝试拉取；或先 `ollama pull {args.model}`。"
+                f"[sysmap-local] 提示: Ollama 未在线 ({base})，将跳过社区命名"
+                f"（社区显示为 'Community N'）。图谱本体不受影响。"
+                f"\n  想要社区命名：`ollama serve` 后重跑，或 `--backend openai` 等。"
             )
-        print(f"[sysmap-local] 后端=ollama 模型={args.model} @ {base}")
+            self_backend = None
+        else:
+            if args.model not in models and args.model.split(":")[0] not in [
+                m.split(":")[0] for m in models
+            ]:
+                print(
+                    f"[sysmap-local] 警告: 本地未发现模型 '{args.model}'。"
+                    f"已安装: {', '.join(models) or '(空)'}。"
+                    f"\n  Ollama 会在首次调用时尝试拉取；或先 `ollama pull {args.model}`。"
+                )
+            print(f"[sysmap-local] 社区命名后端=ollama 模型={args.model} @ {base}")
     else:
-        print(f"[sysmap-local] 后端={args.backend}（使用对应的 API key 环境变量）")
+        print(f"[sysmap-local] 社区命名后端={args.backend}（使用对应的 API key 环境变量）")
 
-    # ---- 1. 只读侦察 -------------------------------------------------
-    print(f"\n[sysmap-local] 1/3 侦察 {args.url} (max={args.max}) → {raw}")
+    # ---- 1. 只读侦察 + 确定性建图 ------------------------------------
+    print(f"\n[sysmap-local] 1/2 侦察 {args.url} (max={args.max}) → {raw}")
     cenv = dict(os.environ)
     cenv["SYSMAP_URL"] = args.url
     cenv["SYSMAP_MAX_PAGES"] = str(args.max)
@@ -132,23 +138,22 @@ def cmd_build(args):
             "换一个更深的 URL 再试。"
         )
 
-    # ---- 2. 本地抽取 → graph.json -----------------------------------
-    print(f"\n[sysmap-local] 2/3 抽取实体/关系 (graphify extract, backend={args.backend})")
-    rc = subprocess.run(
-        [gbin, "extract", str(raw), "--backend", args.backend], env=genv
-    ).returncode
-    if rc != 0:
-        die("graphify extract 失败。")
-
+    # crawl.py 已确定性生成 graph.json（无 LLM、与 raw 地图等价、无损）
     graph = raw / "graphify-out" / "graph.json"
     if not graph.exists():
-        die(f"未生成 {graph}。")
+        die(f"未生成 {graph}（爬虫未产出图谱）。")
+    gj = json.loads(graph.read_text(encoding="utf-8"))
+    print(
+        f"[sysmap-local]   确定性图谱: {len(gj.get('nodes', []))} 节点 / "
+        f"{len(gj.get('links', []))} 边（无 LLM、与抓取地图一一对应）"
+    )
 
-    # ---- 3. 聚类命名 + 报告 + HTML ----------------------------------
-    print(f"\n[sysmap-local] 3/3 社区命名 + 报告 + HTML (graphify cluster-only)")
-    rc = subprocess.run(
-        [gbin, "cluster-only", str(raw), "--backend", args.backend], env=genv
-    ).returncode
+    # ---- 2. 聚类 + 社区命名(本地模型, 可选) + 报告 + HTML ------------
+    print(f"\n[sysmap-local] 2/2 聚类/命名/报告/HTML (graphify cluster-only)")
+    cl_cmd = [gbin, "cluster-only", str(raw)]
+    if self_backend:
+        cl_cmd += ["--backend", self_backend]
+    rc = subprocess.run(cl_cmd, env=genv).returncode
     if rc != 0:
         print("[sysmap-local] 警告: cluster-only 失败，社区可能保留占位名。图谱仍可用。")
 

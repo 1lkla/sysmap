@@ -15,36 +15,35 @@ It produces 6 maps and fuses them into one queryable knowledge graph:
 
 ## Design: why local can still be 100%
 
-The pipeline splits into two stages, and **only part of the second stage uses a model**:
+**The graph structure (nodes + edges) is built deterministically by code — no
+model in the loop.** A model is used only for two optional things: naming the
+communities and summarizing a subgraph at query time.
 
 ```
 your logged-in Chrome
        │ read-only CDP (browser-harness, local)
        ▼
-[A] crawl.py ── pure code, no LLM ──► <out>/raw/*.md
-       │   BFS over same-origin routes + capture XHR/Fetch via CDP + read DOM controls
-       │   writes the relationships as explicit sentences:
-       │     "Route /x calls API GET /y"
-       │     "Feature \"Export\" is available on route /x"
-       │     "Route /x was denied access to API ... (permission restriction)"
+[A] crawl.py ── pure code, no LLM ──►  <out>/raw/*.md   (6 human-readable maps)
+       │                            +  graphify-out/graph.json (deterministic graph)
+       │   1) parse every same-origin JS bundle: mine the SPA router table + /api endpoints (with method)
+       │   2) GET-navigate each discovered route: capture runtime XHR/Fetch + 401/403 + DOM controls
+       │   3) assemble routes/APIs/features/permissions/admin/files straight into graph.json
        ▼
-[B] graphify ── local LLM backend (ollama) ──► graph.json + graph.html + GRAPH_REPORT.md
-       ├─ extract:      AST (deterministic) + semantic edge-filling/dedup (local model)
-       └─ cluster-only: community detection (deterministic) + naming (local model) + report/HTML
+[B] graphify cluster-only ──► community detection (deterministic) + naming (local model, optional) + report + HTML
 ```
 
-**Key insight**: the hardest, most quality-critical part — reconnaissance (A) —
-is deterministic code with zero model involvement; the relationships for all 6
-maps are already written out as explicit English sentences. What's left for the
-model (B) is just "connect already-explicit relationships into a graph, name the
-communities, and summarize a subgraph at query time" — tasks a 7B–30B local
-model handles reliably. Therefore:
+**Key insight**: sysmap's six maps are already structured data, so the graph is
+assembled by code — **there is no LLM extraction step**, hence no "model
+compresses a long list" loss. This means:
 
-- **Local ≠ downgraded**: the graph's skeleton comes from code, not the model.
-- **Reproducible**: the orchestration is a deterministic script, with none of a
-  cloud agent's randomness.
-- **Zero data exfiltration**: the logged-in system's DOM / network traffic is
-  processed only on your machine.
+- **Local graph = cloud graph**: structure comes from code, independent of which
+  model you use. All 27 APIs and 11 routes are present; the model only affects how
+  nice the community names read.
+- **Deeper recon**: not just `<a>` links — it statically parses JS bundles to mine
+  SPA routes and endpoints (login/upload/query/bugs/user-management…), and
+  GET-drives each route to record real runtime 401/403 signals.
+- **Reproducible / zero exfiltration**: deterministic script, no randomness; the
+  logged-in system's data is processed only on your machine.
 
 ### What already exists
 - `browser-harness` → reused as the read-only CDP recon driver. It is **already
@@ -58,37 +57,38 @@ model handles reliably. Therefore:
 
 ---
 
-## Model choice matters (benchmarked on a test range)
+## Why graph construction dropped the LLM (benchmarked on a test range)
 
-On an authorized test range, with the **same crawl, same graphify, same
-extraction prompt — only the backend swapped**:
+An early version used an LLM to "extract" the graph from the maps. A test-range
+benchmark exposed how unreliable that is — **same maps, only the backend swapped**:
 
-| Backend (graph-build model) | Nodes | Edges | Graph usable? |
+| Graph build | Nodes | Edges | Result |
 |---|---|---|---|
-| general chat model glm-4.7-flash | 6 | **0** | ❌ collapses each file into one mega-node, loses all relations |
-| **code model qwen2.5-coder:7b** (default) | 11 | **16** | ✅ properly atomized, accurate edges, ~on par with cloud |
-| cloud Claude (claude-cli backend) | 12 | 17 | ✅ slightly richer (more INFERRED edges + audit metadata) |
+| LLM extract · chat model glm-4.7-flash | 6 | **0** | ❌ collapses each file into a mega-node, loses all relations |
+| LLM extract · code model qwen2.5-coder:7b | 11→7 | 16→6 | ⚠️ ok on small input, **compresses large input (27 APIs)** |
+| LLM extract · cloud Claude | 12 | 17 | ✅ good, but still model-dependent and not local |
+| **deterministic assembly (current)** | **61** | **93** | ✅ 1:1 with the maps — all 27 APIs / 11 routes present |
 
-Takeaway: **the recon stage is model-free and lossless; graph quality depends on
-the extraction model.** A code/structured model (qwen2.5-coder class) pulls the
-relationship edges out correctly and gets local close to cloud Claude; a general
-chat/reasoning model (glm-4.x-flash class) drops every edge and the graph is
-unusable. Hence the default is `qwen2.5-coder:7b`. For more power, `--backend
-openai` to a larger model, or `--backend claude-cli` to use cloud Claude directly.
+Takeaway: the maps are already structured data; asking a model to "extract" them
+only adds compression/hallucination/randomness. Now `crawl.py` **assembles
+graph.json directly**, so graph structure no longer depends on a model — local and
+cloud produce identical output. The model (default `qwen2.5-coder:7b`) is only used
+for **community naming** and **query synthesis**; with it offline you still get the
+full graph (communities fall back to `Community N`).
 
 ---
 
 ## Dependencies
 
-| Component | Role |
-|---|---|
-| [`browser-harness`](https://github.com/browser-use/browser-harness) | Read-only CDP control of your logged-in Chrome |
-| `graphify` + the `[ollama]` extra | Build / cluster / query; the extra ships the openai client (**required** for the ollama backend) |
-| `ollama` + a **code/extraction model** | Semantic edge-filling / community naming / query synthesis |
+| Component | Role | Required? |
+|---|---|---|
+| [`browser-harness`](https://github.com/browser-use/browser-harness) | Read-only CDP control of your logged-in Chrome | **required** |
+| `graphify` + the `[ollama]` extra | Clustering / report / HTML / query (the graph itself is built by crawl.py) | **required** |
+| `ollama` + a local model | **Community naming + query synthesis only** (graph structure does not depend on it) | optional |
 
-> ⚠️ **Model choice is critical** (see above). Default is `qwen2.5-coder:7b`.
-> Do **not** use a general chat/reasoning model (e.g. glm-4.x-flash) for
-> extraction — benchmarks show it drops all relationship edges.
+> Nodes and edges are generated deterministically, so **you get the full graph
+> even with Ollama offline** (community names fall back to `Community N`). For
+> naming/synthesis, the default model is `qwen2.5-coder:7b`.
 
 ---
 

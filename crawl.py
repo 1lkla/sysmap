@@ -411,6 +411,107 @@ for k, v in sorted(apis.items()):
         fm.append("- API %s is a file-handling endpoint" % k)
 w("06_files.md", "\n".join(fm))
 
+# ---- deterministic knowledge graph (no LLM) -----------------------------
+# The six maps above are already structured, so we build graph.json directly
+# instead of asking an LLM to re-extract it (which is lossy on long entity
+# lists). graphify cluster-only then adds communities + report + HTML. This
+# makes the local graph 100% faithful to the recon, independent of model.
+def _slug(s):
+    return re.sub(r"[^a-z0-9]+", "_", (s or "").lower()).strip("_") or "x"
+
+def _node(nid, label, source_file, ntype, **extra):
+    n = {"label": label, "file_type": "concept", "source_file": source_file,
+         "source_location": None, "source_url": ORIGIN, "captured_at": None,
+         "author": None, "contributor": None, "type": ntype,
+         "norm_label": (label or "").lower(), "id": nid}
+    n.update(extra)
+    return n
+
+def _edge(s, t, rel, source_file):
+    return {"relation": rel, "confidence": "EXTRACTED", "confidence_score": 1.0,
+            "source_file": source_file, "source_location": None, "weight": 1.0,
+            "source": s, "target": t}
+
+gnodes, gedges = {}, []
+def _addn(n):
+    gnodes.setdefault(n["id"], n)
+
+sys_id = "sys_" + _slug(SYSTEM)
+_addn(_node(sys_id, "System: %s" % SYSTEM, "00_overview.md", "system"))
+
+route_id = {}
+for r in routes:
+    p = urlparse(r["url"]).path or "/"
+    rid = "route_" + _slug(p)
+    route_id[norm(r["url"])] = rid
+    _addn(_node(rid, "Route %s" % p, "01_routes.md",
+                "admin-route" if r["admin"] else "route"))
+    gedges.append(_edge(sys_id, rid, "contains", "00_overview.md"))
+
+api_id = {}
+for k, v in apis.items():
+    aid = "api_" + _slug(k)
+    api_id[k] = aid
+    _addn(_node(aid, "API %s" % k, "02_apis.md",
+                "file-api" if v["is_file"] else "api",
+                methods=sorted(m for m in v["methods"] if m),
+                status_codes=sorted(v["statuses"]),
+                discovered_via=sorted(v.get("sources") or [])))
+    gedges.append(_edge(sys_id, aid, "contains", "00_overview.md"))
+
+for r in routes:
+    rid = route_id[norm(r["url"])]
+    for k in r["apis"]:
+        if k in api_id:
+            gedges.append(_edge(rid, api_id[k], "calls", "01_routes.md"))
+    for l in r["links"]:
+        tgt = route_id.get(norm(l))
+        if tgt and tgt != rid:
+            gedges.append(_edge(rid, tgt, "links_to", "01_routes.md"))
+
+feat_seen = set()
+for r in routes:
+    p = urlparse(r["url"]).path or "/"
+    rid = route_id[norm(r["url"])]
+    for feat in r["features"]:
+        fid = "feat_" + _slug(p + "_" + feat)
+        if fid not in feat_seen:
+            feat_seen.add(fid)
+            _addn(_node(fid, "Feature \"%s\"" % feat, "03_features.md", "feature"))
+        gedges.append(_edge(rid, fid, "provides", "03_features.md"))
+
+file_seen = set()
+for f in file_ctrls:
+    p = urlparse(f["route"]).path or "/"
+    fid = "file_" + _slug(p + "_" + f["kind"] + "_" + f["label"])
+    if fid in file_seen:
+        continue
+    file_seen.add(fid)
+    _addn(_node(fid, "%s \"%s\"" % (f["kind"], f["label"]), "06_files.md", "file-control"))
+    rid = route_id.get(norm(f["route"]))
+    if rid:
+        gedges.append(_edge(rid, fid, "handles_files_via", "06_files.md"))
+
+for i, s in enumerate(perm_signals):
+    p = urlparse(s["route"]).path or "/"
+    rid = route_id.get(norm(s["route"]))
+    pid = "perm_" + _slug(p + "_" + s["kind"] + "_" + str(i))
+    _addn(_node(pid, "Permission: %s on %s" % (s["detail"], p), "04_permissions.md", "permission"))
+    if rid:
+        gedges.append(_edge(pid, rid, "restricts", "04_permissions.md"))
+    if s["kind"] == "denied-api":
+        key = s["detail"].split(" -> ")[0].strip()
+        if key in api_id:
+            gedges.append(_edge(pid, api_id[key], "denies_access_to", "04_permissions.md"))
+
+gpath = os.path.join(RAW, "graphify-out")
+os.makedirs(gpath, exist_ok=True)
+graph = {"directed": False, "multigraph": False, "graph": {},
+         "nodes": list(gnodes.values()), "links": gedges, "hyperedges": []}
+with open(os.path.join(gpath, "graph.json"), "w", encoding="utf-8") as f:
+    json.dump(graph, f, ensure_ascii=False, indent=1)
+print("sysmap: wrote deterministic graph.json: %d nodes, %d edges" % (len(gnodes), len(gedges)))
+
 # raw network log (reference, not for the graph)
 with open(os.path.join(OUT, "network.jsonl"), "w", encoding="utf-8") as f:
     for rec in network_log:

@@ -1,0 +1,13 @@
+# 抓取/构图产物（含目标系统数据，绝不入库）
+sysmap-out/
+*/graphify-out/
+network.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 系统
+.DS_Store

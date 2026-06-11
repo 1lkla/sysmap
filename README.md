@@ -48,15 +48,32 @@
 
 ---
 
+## 模型选型很关键（靶场实测）
+
+在一个授权测试靶场上，**同一次抓取、同一套 graphify、同一抽取 prompt，只换后端**实测：
+
+| 后端（构图模型） | 节点 | 边 | 图谱可用性 |
+|---|---|---|---|
+| 通用对话模型 glm-4.7-flash | 6 | **0** | ❌ 把每个文件塞成一个巨型节点，关系全丢 |
+| **代码模型 qwen2.5-coder:7b**（默认） | 11 | **16** | ✅ 正确原子化，关系准确，与云端基本持平 |
+| 云端 Claude（claude-cli 后端） | 12 | 17 | ✅ 略丰富（更多 INFERRED 边 + 审计元数据） |
+
+结论：**抓取层不依赖模型、零损失；构图质量取决于抽取模型**。代码/结构化模型
+（qwen2.5-coder 一类）能把关系边正确抽出，本地即可逼近云端 Claude；通用对话/推理
+模型（glm-4.x-flash 一类）会丢光边、图谱不可用。所以默认用 `qwen2.5-coder:7b`。
+想更强可 `--backend openai` 接更大模型，或 `--backend claude-cli` 直接用云端 Claude。
+
+---
+
 ## 依赖
 
 | 组件 | 作用 | 你的机器 |
 |---|---|---|
 | [`browser-harness`](https://github.com/browser-use/browser-harness) | 只读 CDP 控制你已登录的 Chrome | 已装（$PATH） |
-| `graphify` | 构图/聚类/查询，内置 ollama 后端 | 已装（`~/.local/bin/graphify`） |
-| `ollama` + 一个本地模型 | 语义补边 / 社区命名 / 查询综述 | 已装；模型 `glm-4.7-flash:latest` |
+| `graphify` + `[ollama]` extra | 构图/聚类/查询，内置 ollama 后端（extra 带 openai 客户端，**必需**） | `uv tool install "graphifyy[ollama]"` |
+| `ollama` + 一个**代码/抽取模型** | 语义补边 / 社区命名 / 查询综述 | `ollama pull qwen2.5-coder:7b`（默认） |
 
-> 想换更专精代码的小模型：`ollama pull qwen2.5-coder:7b`，再用 `--model qwen2.5-coder:7b`。
+> ⚠️ **模型选型很关键**——见下文「模型选型」。默认 `qwen2.5-coder:7b`；**不要**用通用对话/推理模型（如 glm-4.x-flash）做抽取，实测会丢光关系边。
 
 ---
 
@@ -67,18 +84,18 @@
 git clone https://github.com/1lkla/sysmap.git
 cd sysmap
 
-# 2) 安装 graphify（构图/聚类/查询，内置 ollama 后端）
-uv tool install graphifyy          # 推荐；或 pip install graphifyy
+# 2) 安装 graphify（务必带 [ollama] extra，否则 ollama 后端报缺 openai 包）
+uv tool install "graphifyy[ollama]"   # 推荐；或 pip install "graphifyy[ollama]"
 
 # 3) 安装 browser-harness（只读 CDP 控制你已登录的 Chrome）
 #    https://github.com/browser-use/browser-harness （见其 install.md）
 #    安装后确认它在 $PATH 上：
 which browser-harness
 
-# 4) 安装 Ollama + 拉一个本地模型
+# 4) 安装 Ollama + 拉默认的代码/抽取模型
 brew install ollama                 # 或装 Ollama.app
 ollama serve &
-ollama pull glm-4.7-flash           # 默认模型；或 qwen2.5-coder:7b
+ollama pull qwen2.5-coder:7b       # 默认模型（代码/结构化抽取，实测追平云端 Claude）
 
 # 5) 自检：确认三件套就绪
 which graphify browser-harness ollama
@@ -118,7 +135,7 @@ python3 sysmap_local.py query "管理后台有哪些功能只有 admin 能用?" 
 - `--max N` 抓取路由上限（默认 40）
 - `--out DIR` 输出目录（默认 `./sysmap-out`）
 - `--backend NAME` 切换 graphify 后端：`ollama`(默认)/`openai`/`deepseek`/`gemini`/`claude-cli`
-- `--model NAME` 本地模型名（默认 `glm-4.7-flash:latest`）
+- `--model NAME` 本地模型名（默认 `qwen2.5-coder:7b`）
 - `--ollama-base URL` 覆盖 `OLLAMA_BASE_URL`（如指到 LM Studio 的 OpenAI 兼容端口）
 
 ### 接 LM Studio 而不是 Ollama

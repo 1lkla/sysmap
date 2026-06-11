@@ -20,7 +20,7 @@
 
 用法:
     python3 sysmap_local.py build <start-url> [--max 40] [--out ./sysmap-out]
-                                  [--backend ollama] [--model glm-4.7-flash:latest]
+                                  [--backend ollama] [--model qwen2.5-coder:7b]
     python3 sysmap_local.py query "<问题>" [--out ./sysmap-out] [--synthesize]
 
 安全: 只读侦察。仅对你拥有或已获授权的系统运行。遇到登录墙会停止，不输入任何凭据。
@@ -257,8 +257,8 @@ def main():
     )
     b.add_argument(
         "--model",
-        default=os.environ.get("OLLAMA_MODEL", "glm-4.7-flash:latest"),
-        help="本地模型名 (默认 glm-4.7-flash:latest)",
+        default=os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b"),
+        help="本地模型名 (默认 qwen2.5-coder:7b — 代码/结构化抽取模型，实测远好于通用对话模型)",
     )
     b.add_argument("--ollama-base", default=None, help="覆盖 OLLAMA_BASE_URL")
     b.set_defaults(func=cmd_build)
@@ -275,7 +275,7 @@ def main():
     )
     q.add_argument(
         "--model",
-        default=os.environ.get("OLLAMA_MODEL", "glm-4.7-flash:latest"),
+        default=os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b"),
         help="综述用的本地模型",
     )
     q.add_argument("--ollama-base", default=None, help="覆盖 OLLAMA_BASE_URL")

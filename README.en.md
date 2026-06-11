@@ -58,16 +58,37 @@ model handles reliably. Therefore:
 
 ---
 
+## Model choice matters (benchmarked on a test range)
+
+On an authorized test range, with the **same crawl, same graphify, same
+extraction prompt — only the backend swapped**:
+
+| Backend (graph-build model) | Nodes | Edges | Graph usable? |
+|---|---|---|---|
+| general chat model glm-4.7-flash | 6 | **0** | ❌ collapses each file into one mega-node, loses all relations |
+| **code model qwen2.5-coder:7b** (default) | 11 | **16** | ✅ properly atomized, accurate edges, ~on par with cloud |
+| cloud Claude (claude-cli backend) | 12 | 17 | ✅ slightly richer (more INFERRED edges + audit metadata) |
+
+Takeaway: **the recon stage is model-free and lossless; graph quality depends on
+the extraction model.** A code/structured model (qwen2.5-coder class) pulls the
+relationship edges out correctly and gets local close to cloud Claude; a general
+chat/reasoning model (glm-4.x-flash class) drops every edge and the graph is
+unusable. Hence the default is `qwen2.5-coder:7b`. For more power, `--backend
+openai` to a larger model, or `--backend claude-cli` to use cloud Claude directly.
+
+---
+
 ## Dependencies
 
 | Component | Role |
 |---|---|
 | [`browser-harness`](https://github.com/browser-use/browser-harness) | Read-only CDP control of your logged-in Chrome |
-| `graphify` | Build / cluster / query the graph; ships an ollama backend |
-| `ollama` + a local model | Semantic edge-filling / community naming / query synthesis |
+| `graphify` + the `[ollama]` extra | Build / cluster / query; the extra ships the openai client (**required** for the ollama backend) |
+| `ollama` + a **code/extraction model** | Semantic edge-filling / community naming / query synthesis |
 
-> Want a more code-specialized small model? `ollama pull qwen2.5-coder:7b`, then
-> pass `--model qwen2.5-coder:7b`.
+> ⚠️ **Model choice is critical** (see above). Default is `qwen2.5-coder:7b`.
+> Do **not** use a general chat/reasoning model (e.g. glm-4.x-flash) for
+> extraction — benchmarks show it drops all relationship edges.
 
 ---
 
@@ -78,18 +99,18 @@ model handles reliably. Therefore:
 git clone https://github.com/1lkla/sysmap.git
 cd sysmap
 
-# 2) Install graphify (build/cluster/query, ships an ollama backend)
-uv tool install graphifyy          # recommended; or: pip install graphifyy
+# 2) Install graphify WITH the [ollama] extra (else the ollama backend errors: missing openai)
+uv tool install "graphifyy[ollama]"   # recommended; or: pip install "graphifyy[ollama]"
 
 # 3) Install browser-harness (read-only CDP control of your logged-in Chrome)
 #    https://github.com/browser-use/browser-harness (see its install.md)
 #    Confirm it's on $PATH:
 which browser-harness
 
-# 4) Install Ollama + pull a local model
+# 4) Install Ollama + pull the default code/extraction model
 brew install ollama                 # or install Ollama.app
 ollama serve &
-ollama pull glm-4.7-flash           # default model; or qwen2.5-coder:7b
+ollama pull qwen2.5-coder:7b       # default model (code/structured extraction; ~matches cloud Claude)
 
 # 5) Sanity check: confirm all three are ready
 which graphify browser-harness ollama
@@ -129,7 +150,7 @@ Build artifacts land in `./sysmap-out/raw/graphify-out/`:
 - `--max N` route crawl cap (default 40)
 - `--out DIR` output directory (default `./sysmap-out`)
 - `--backend NAME` switch graphify backend: `ollama` (default) / `openai` / `deepseek` / `gemini` / `claude-cli`
-- `--model NAME` local model name (default `glm-4.7-flash:latest`)
+- `--model NAME` local model name (default `qwen2.5-coder:7b`)
 - `--ollama-base URL` override `OLLAMA_BASE_URL` (e.g. point at LM Studio's OpenAI-compatible port)
 
 ### Using LM Studio instead of Ollama

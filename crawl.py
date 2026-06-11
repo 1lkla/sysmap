@@ -133,13 +133,88 @@ def is_admin(url, title, headings):
     blob = (url + " " + (title or "") + " " + " ".join(headings or [])).lower()
     return any(h in blob for h in ADMIN_HINTS)
 
+# --- static JS harvest: routes + API endpoints hidden in webpack/SPA bundles ---
+# Modern SPAs declare their router table and fetch/axios endpoints inside JS
+# bundles, not in server-rendered <a href>. We download every same-origin script
+# and statically mine route paths + /api/ endpoints (with HTTP method when the
+# call site reveals it). This is still read-only — we only GET static assets.
+JS_SRCS = "(function(){return JSON.stringify(Array.prototype.slice.call(document.scripts).map(function(s){return s.src;}).filter(Boolean));})()"
+API_RE = re.compile(r"""['"`](/api/[A-Za-z0-9_\-./{}]+)['"`]""")
+PATH_RE = re.compile(r"""path\s*:\s*['"](/[A-Za-z0-9_\-./:]*)['"]""")
+METHOD_CALL_RE = re.compile(r"""\.(get|post|put|delete|patch)\s*\(\s*['"`](/api/[A-Za-z0-9_\-./{}]+)""", re.I)
+METHOD_OBJ_RE = re.compile(
+    r"""url\s*:\s*['"`](/api/[A-Za-z0-9_\-./{}]+)['"`][^{}]{0,80}?method\s*:\s*['"`](\w+)"""
+    r"""|method\s*:\s*['"`](\w+)['"`][^{}]{0,80}?url\s*:\s*['"`](/api/[A-Za-z0-9_\-./{}]+)['"`]""",
+    re.I)
+
+def harvest_js():
+    """Return (api_methods{path:set(METHOD)}, route_paths[list], n_scripts_fetched)."""
+    try:
+        raw = js(JS_SRCS)
+        srcs = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except Exception:
+        srcs = []
+    srcs = [s for s in srcs if same_origin(s)]
+    blobs = []
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        def _g(u):
+            try:
+                return http_get(u) or ""
+            except Exception:
+                return ""
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            blobs = list(ex.map(_g, srcs))
+    except Exception:
+        for u in srcs:
+            try:
+                blobs.append(http_get(u) or "")
+            except Exception:
+                pass
+    blob = "\n".join(blobs)
+    methods = {}
+    for m in METHOD_CALL_RE.finditer(blob):
+        methods.setdefault(m.group(2).rstrip("."), set()).add(m.group(1).upper())
+    for m in METHOD_OBJ_RE.finditer(blob):
+        p = (m.group(1) or m.group(4) or "").rstrip(".")
+        meth = (m.group(2) or m.group(3) or "").upper()
+        if p:
+            methods.setdefault(p, set()).add(meth)
+    api_methods = {}
+    for m in API_RE.finditer(blob):
+        p = m.group(1).rstrip(".")
+        api_methods.setdefault(p, set()).update(methods.get(p, set()))
+    routes_found = sorted({m.group(1) for m in PATH_RE.finditer(blob)
+                           if not m.group(1).startswith("/api")})
+    return api_methods, routes_found, len(blobs)
+
 # ---- crawl ----
 print("sysmap: crawling %s (origin %s, max %d pages)" % (START, ORIGIN, MAX_PAGES))
 new_tab(START); wait_for_load()
 cdp("Network.enable")
 
 seen, queue, routes = set(), [norm(START)], []
-apis = {}          # key -> {methods, statuses, types, routes, full_url, is_file}
+apis = {}          # key -> {methods, statuses, types, routes, full_url, is_file, sources}
+
+# --- harvest JS first: seed routes + register statically-known APIs ---
+js_apis, js_routes, n_js = harvest_js()
+print("sysmap: harvested %d JS bundles -> %d route paths, %d API endpoints" %
+      (n_js, len(js_routes), len(js_apis)))
+for rp in js_routes:
+    full = norm(ORIGIN + rp)
+    if full not in queue:
+        queue.append(full)
+for p, meths in sorted(js_apis.items()):
+    norm_path = re.sub(r"/\d+", "/{id}", p)
+    for meth in (sorted(m for m in meths if m) or ["?"]):
+        k = "%s %s" % (meth, norm_path)
+        slot = apis.setdefault(k, {"methods": set(), "statuses": set(), "types": set(),
+                                   "routes": set(), "full_url": ORIGIN + p, "is_file": False,
+                                   "sources": set()})
+        if meth != "?":
+            slot["methods"].add(meth)
+        slot["is_file"] = slot["is_file"] or any(h in p.lower() for h in FILE_HINTS)
+        slot["sources"].add("JS-static")
 file_ctrls = []    # {route, kind, label}
 perm_signals = []  # {route, kind, detail}
 admin_routes = []
@@ -176,7 +251,11 @@ while queue and len(routes) < MAX_PAGES:
         k = api_key(r.get("method", "GET"), r.get("url", ""))
         is_file = any(h in r.get("url", "").lower() for h in FILE_HINTS)
         slot = apis.setdefault(k, {"methods": set(), "statuses": set(), "types": set(),
-                                   "routes": set(), "full_url": r.get("url", ""), "is_file": False})
+                                   "routes": set(), "full_url": r.get("url", ""), "is_file": False,
+                                   "sources": set()})
+        slot.setdefault("sources", set()).add("runtime")
+        if not slot.get("full_url"):
+            slot["full_url"] = r.get("url", "")
         slot["methods"].add((r.get("method") or "").upper())
         if r.get("status") is not None:
             slot["statuses"].add(r.get("status"))
@@ -264,9 +343,11 @@ ap = ["# API Map of %s\n" % SYSTEM]
 for k, v in sorted(apis.items()):
     ap.append("## API %s" % k)
     ap.append("- Full URL: %s" % v["full_url"])
-    ap.append("- Methods: %s" % ", ".join(sorted(m for m in v["methods"] if m)))
-    ap.append("- Status codes observed: %s" % ", ".join(str(s) for s in sorted(v["statuses"])))
-    ap.append("- Request type: %s" % ", ".join(sorted(t for t in v["types"] if t)))
+    ap.append("- Methods: %s" % (", ".join(sorted(m for m in v["methods"] if m)) or "(unknown)"))
+    ap.append("- Discovered via: %s" % ", ".join(sorted(v.get("sources") or {"runtime"})))
+    obs = ", ".join(str(s) for s in sorted(v["statuses"]))
+    ap.append("- Status codes observed: %s" % (obs or "not yet called at runtime (static only)"))
+    ap.append("- Request type: %s" % (", ".join(sorted(t for t in v["types"] if t)) or "n/a"))
     ap.append("- API %s handles files: %s" % (k, "yes" if v["is_file"] else "no"))
     for rt_ in sorted(v["routes"]):
         ap.append("- API %s is called by route %s" % (k, urlparse(rt_).path or "/"))

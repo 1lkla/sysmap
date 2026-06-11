@@ -1,5 +1,7 @@
 # sysmap-local
 
+**中文** · [English](./README.en.md)
+
 把「调用浏览器分析已登录系统整体架构 → 知识图谱」这个能力**完全本地化**。
 不依赖云端 Claude/GPT，用本地模型（Ollama 上的 GLM / Qwen 等）就能跑，质量几乎不掉点。
 

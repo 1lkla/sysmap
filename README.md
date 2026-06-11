@@ -50,7 +50,7 @@
 
 | 组件 | 作用 | 你的机器 |
 |---|---|---|
-| `browser-harness` | 只读 CDP 控制你已登录的 Chrome | 已装（$PATH） |
+| [`browser-harness`](https://github.com/browser-use/browser-harness) | 只读 CDP 控制你已登录的 Chrome | 已装（$PATH） |
 | `graphify` | 构图/聚类/查询，内置 ollama 后端 | 已装（`~/.local/bin/graphify`） |
 | `ollama` + 一个本地模型 | 语义补边 / 社区命名 / 查询综述 | 已装；模型 `glm-4.7-flash:latest` |
 
@@ -69,8 +69,8 @@ cd sysmap
 uv tool install graphifyy          # 推荐；或 pip install graphifyy
 
 # 3) 安装 browser-harness（只读 CDP 控制你已登录的 Chrome）
-#    见 https://github.com/<browser-harness> 或你本地的 browser-harness/install.md
-#    确认它在 $PATH 上：
+#    https://github.com/browser-use/browser-harness （见其 install.md）
+#    安装后确认它在 $PATH 上：
 which browser-harness
 
 # 4) 安装 Ollama + 拉一个本地模型
